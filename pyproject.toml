@@ -21,11 +21,13 @@ exclude = '''
 profile = "black"
 
 [tool.poetry]
-name = "funda_tracker"
+name = "funda-tracker"
 version = "0.0.0"
 description = ""
 authors = []
-packages = []
+packages = [
+    { include = "funda_tracker" },
+]
 
 [tool.poetry.dependencies]
 python = ">=3.9"

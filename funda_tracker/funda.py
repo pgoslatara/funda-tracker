@@ -351,32 +351,20 @@ def parse_funda_results(results_object):
             listing_parsed = {
                 "listing_id": listing["_id"],
                 "agent_id": listing_details.get("agent", [{}])[0].get("id", ""),
-                "agent_url": listing_details.get("agent", [{}])[0].get(
-                    "relative_url", ""
-                ),
+                "agent_url": listing_details.get("agent", [{}])[0].get("relative_url", ""),
                 "agent_name": listing_details.get("agent", [{}])[0].get("name", ""),
-                "agent_association": listing_details.get("agent", [{}])[0].get(
-                    "association", ""
-                ),
+                "agent_association": listing_details.get("agent", [{}])[0].get("association", ""),
                 "address_country": listing_details["address"]["country"],
                 "address_province": listing_details["address"].get("province", ""),
                 "address_city": listing_details["address"].get("city", ""),
-                "address_neighbourhood": listing_details["address"].get(
-                    "neighbourhood", ""
-                ),
-                "address_municipality": listing_details["address"].get(
-                    "municipality", ""
-                ),
-                "address_house_number": listing_details["address"].get(
-                    "house_number", ""
-                ),
+                "address_neighbourhood": listing_details["address"].get("neighbourhood", ""),
+                "address_municipality": listing_details["address"].get("municipality", ""),
+                "address_house_number": listing_details["address"].get("house_number", ""),
                 "address_house_number_suffix": listing_details["address"].get(
                     "house_number_suffix", ""
                 ),
                 "address_postal_code": listing_details["address"]["postal_code"],
-                "address_street_name": listing_details["address"].get(
-                    "street_name", ""
-                ),
+                "address_street_name": listing_details["address"].get("street_name", ""),
                 "number_of_bedrooms": listing_details.get("number_of_bedrooms", None),
                 "number_of_rooms": listing_details.get("number_of_rooms", None),
                 "object_type": listing_details.get("object_type", None),
@@ -388,9 +376,7 @@ def parse_funda_results(results_object):
                 "status": listing_details.get("status", ""),
                 "price": listing_details["price"].get("selling_price", [None])[0],
                 "price_type": listing_details["price"].get("selling_price_type", ""),
-                "price_condition": listing_details["price"].get(
-                    "selling_price_condition", ""
-                ),
+                "price_condition": listing_details["price"].get("selling_price_condition", ""),
                 "placement_type": listing_details.get("placement_type", ""),
                 "availability": listing_details.get("availability", ""),
                 "amenities": ",".join(listing_details.get("amenities", [])),
@@ -403,9 +389,7 @@ def parse_funda_results(results_object):
                 "sale_date_range": f'{listing_details.get("sale_date_range", {}).get("gte", "")}~{listing_details.get("sale_date_range", {}).get("lte", "")}',
                 "selected_area": listing_details.get("selected_area", ""),
                 "description": listing_details.get("description", {}).get("dutch", ""),
-                "description_tags": listing_details.get("description", {}).get(
-                    "tags", ""
-                ),
+                "description_tags": listing_details.get("description", {}).get("tags", ""),
                 "zoning": listing_details.get("zoning", ""),
                 "surrounding": ",".join(listing_details.get("surrounding", [])),
                 "offering_type": ",".join(listing_details.get("offering_type", [])),
@@ -427,8 +411,8 @@ def parse_funda_results(results_object):
             listing_parsed["neighbourhood_inhabitants"] = neightbourhood_insights.get(
                 "inhabitants", None
             )
-            listing_parsed["neighbourhood_avg_askingprice_m2"] = (
-                neightbourhood_insights.get("averageAskingPricePerM2", None)
+            listing_parsed["neighbourhood_avg_askingprice_m2"] = neightbourhood_insights.get(
+                "averageAskingPricePerM2", None
             )
             listing_parsed["neighbourhood_families_with_children_pct"] = (
                 neightbourhood_insights.get("familiesWithChildren", None)
@@ -455,9 +439,7 @@ def store_results(results, table, conn):
     for result in results:
         try:
             data = {
-                "id": xxhash.xxh64(
-                    "~~".join([str(x) for x in result.values()])
-                ).hexdigest(),
+                "id": xxhash.xxh64("~~".join([str(x) for x in result.values()])).hexdigest(),
                 **result,
                 "_processing_time": str(datetime.datetime.now()),
                 "_run_id": run_id,
@@ -475,9 +457,7 @@ def store_results(results, table, conn):
 
         except Exception as e:
             print(f"Encountered error: {e}")
-            print(
-                f"Error storing results for {result['listing_id']} ({result}) \n\n {query}"
-            )
+            print(f"Error storing results for {result['listing_id']} ({result}) \n\n {query}")
 
 
 def cli():
