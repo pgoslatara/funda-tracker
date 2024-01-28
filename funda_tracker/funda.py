@@ -1,4 +1,3 @@
-import argparse
 import datetime
 import random
 import time
@@ -467,30 +466,20 @@ def db_setup(table, schema, conn):
     conn.cursor().execute(query)
 
 
-def cli():
+def cli(postal_code, km_radius, publication_date, database_file_name):
     global CONNECTION
-    CONNECTION = duckdb.connect(database="main.duckdb")
+    CONNECTION = duckdb.connect(database=database_file_name)
 
     db_setup("funda", funda_schema, CONNECTION)
-
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--postal_code", type=int, required=True)
-    parser.add_argument("--km_radius", type=int, required=True)
-    parser.add_argument("--publication_date", type=str, default="now-30d")
-
-    args = parser.parse_args()
-
-    print(f"Running with args: {args.__dict__}")
 
     results_processed = 0
     results_total = 1
     page_size = 100
     while results_processed < results_total:
         res = get_results(
-            postal_code4=args.postal_code,
-            km_radius=args.km_radius,
-            publication_date=args.publication_date,
+            postal_code4=postal_code,
+            km_radius=km_radius,
+            publication_date=publication_date,
             start_index=results_processed,
             page_size=page_size,
         )
@@ -510,7 +499,7 @@ def cli():
         parsed_results = [
             {
                 **x,
-                "search_query": f"{args.postal_code}~{args.km_radius}~{args.publication_date}",
+                "search_query": f"{postal_code}~{km_radius}~{publication_date}",
             }
             for x in parse_funda_results(res)
             if x
