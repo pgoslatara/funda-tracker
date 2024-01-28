@@ -8,3 +8,7 @@ __pycache__/
 logs/
 dbt_packages/
 target/
+
+main.duckdb
+main.duckdb.wal
+*.ipynb

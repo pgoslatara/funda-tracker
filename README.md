@@ -10,7 +10,7 @@ Among other things this will return:
 - Object type (apartment, house, parking, land, etc.)
 - Energy label
 - Floor area in m2
-- Plot area in m2 
+- Plot area in m2
 - Status (sold, sold_under_reservation, none)
 - Amenities (boiler, bathtub, renewable_energy, etc.)
 - Construction period
