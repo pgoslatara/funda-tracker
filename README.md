@@ -1,6 +1,6 @@
 Fetch all data from Funda for a specific 4-digit postal code in a x-KM radius and store it in a DuckDB database.
 
-1. `pip install -r requirements.txt`
+1. `poetry install`
 1. `python fundatracker --postal_code 1011 --km_radius 5`
 
 Among other things this will return:
