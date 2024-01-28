@@ -7,7 +7,6 @@ from typing import Literal
 
 import duckdb
 import requests
-import utils
 import xxhash
 
 # GLOBALS
@@ -460,11 +459,19 @@ def store_results(results, table, conn):
             print(f"Error storing results for {result['listing_id']} ({result}) \n\n {query}")
 
 
+def db_setup(table, schema, conn):
+    query = f"""
+        CREATE TABLE IF NOT EXISTS {table}({", ".join([f"{k} {v}" for (k,v) in schema.items()])})
+    """
+
+    conn.cursor().execute(query)
+
+
 def cli():
     global CONNECTION
     CONNECTION = duckdb.connect(database="main.duckdb")
 
-    utils.db_setup("funda", funda_schema, CONNECTION)
+    db_setup("funda", funda_schema, CONNECTION)
 
     parser = argparse.ArgumentParser()
 
