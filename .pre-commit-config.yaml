@@ -1,42 +1,32 @@
 repos:
+  # Pre-commit hooks for general code quality
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: "docs"
-      - id: check-added-large-files
-        exclude: "docs"
-      - id: check-json
-      - id: check-ast
-      - id: check-merge-conflict
-      - id: check-toml
-      - id: check-yaml
-        args: [--unsafe]
-      - id: debug-statements
-      - id: detect-private-key
       - id: end-of-file-fixer
-        exclude: "docs|local_output|output"
-  - repo: https://github.com/kynan/nbstripout
-    rev: 0.6.1
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: debug-statements
+      - id: check-json
+
+  # Ruff for Python linting and formatting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.13.0
     hooks:
-      - id: nbstripout
-  - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # Run tests before commit
+  - repo: local
     hooks:
-      - id: isort
-        args: ["--profile", "black", "--filter-files"]
-        name: isort (python)
-  - repo: https://github.com/ambv/black
-    rev: 24.1.0
-    hooks:
-      - id: black
-        name: Run black formatter
-  - repo: https://github.com/PyCQA/autoflake
-    rev: v2.2.1
-    hooks:
-      - id: autoflake
-        args: ["--in-place", "--remove-all-unused-imports"]
-  - repo: https://github.com/tconbeer/sqlfmt
-    rev: v0.21.2
-    hooks:
-      - id: sqlfmt
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
+        args: [tests/, -v]
