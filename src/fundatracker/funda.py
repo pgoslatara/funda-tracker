@@ -9,6 +9,8 @@ from typing import Literal
 import xxhash
 from curl_cffi import requests
 
+from . import bag
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -59,6 +61,7 @@ def get_funda_schema():
         "construction_date_range": "VARCHAR(100)",
         "construction_period": "VARCHAR(100)",
         "construction_type": "VARCHAR(100)",
+        "bag_bouwjaar": "INTEGER",
         "handover_date_range": "VARCHAR(100)",
         "offering_type": "VARCHAR(100)",
         "project": "VARCHAR(100)",
@@ -153,12 +156,14 @@ def get_results(
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
-        "cache-control" : "no-cache",
+        "cache-control": "no-cache",
         "Referer": "https://www.funda.nl/",
         "User-Agent": USER_AGENT,
     }
 
-    res = requests.post(base_url, data=ndjson_body, headers=headers, impersonate="chrome")
+    res = requests.post(
+        base_url, data=ndjson_body, headers=headers, impersonate="chrome"
+    )
 
     if res.status_code != 200:
         raise Exception(
@@ -347,6 +352,36 @@ def parse_funda_results(results_object, use_listing_insights=True):
     return parsed_results
 
 
+def enrich_bag_bouwjaar(results, enricher=None):
+    """Populate ``bag_bouwjaar`` on each parsed listing from the BAG registry.
+
+    Funda dropped ``construction_period`` from its API around Oct 2025, so build
+    era is enriched from the authoritative Dutch BAG building registry via PDOK.
+    Resilient by design: a BAG failure for one listing stores ``None`` and never
+    aborts the scrape. Results are cached on disk by ``BagEnricher`` so repeated
+    addresses across pages/runs are cheap.
+    """
+    if enricher is None:
+        enricher = bag.get_default_enricher()
+
+    for result in results:
+        try:
+            result["bag_bouwjaar"] = enricher.lookup_bouwjaar(
+                street=result.get("address_street_name"),
+                housenumber=result.get("address_house_number"),
+                suffix=result.get("address_house_number_suffix"),
+                postal_code=result.get("address_postal_code"),
+                city=result.get("address_city"),
+            )
+        except Exception as e:  # noqa: BLE001 - never let BAG break ingestion
+            logging.warning(
+                f"BAG enrichment failed for {result.get('listing_id')}: {e}"
+            )
+            result["bag_bouwjaar"] = None
+
+    return results
+
+
 def store_results(results, table, conn):
     cursor = conn.cursor()
     logging.debug(f"Storing {len(results)} results...")
@@ -377,13 +412,23 @@ def store_results(results, table, conn):
 
 
 def tracker(
-    postal_code, km_radius, publication_date, connection, sleep_between_requests_sec=5
+    postal_code,
+    km_radius,
+    publication_date,
+    connection,
+    sleep_between_requests_sec=5,
+    enrich_bag=True,
 ):
     ES_MAX_RESULT_WINDOW = 10000
     results_processed = 0
     results_total = 1
     page_size = 100
-    while results_processed < results_total and results_processed + page_size <= ES_MAX_RESULT_WINDOW:
+    # One enricher (and its on-disk cache) shared across all pages of this run.
+    bag_enricher = bag.get_default_enricher() if enrich_bag else None
+    while (
+        results_processed < results_total
+        and results_processed + page_size <= ES_MAX_RESULT_WINDOW
+    ):
         res = get_results(
             postal_code4=postal_code,
             km_radius=km_radius,
@@ -415,11 +460,19 @@ def tracker(
             if x
         ]
 
+        if enrich_bag:
+            enrich_bag_bouwjaar(parsed_results, enricher=bag_enricher)
+
         store_results(parsed_results, "funda", connection)
 
         results_processed += results_current_length
 
         time.sleep(sleep_between_requests_sec)
+
+    # Persist the BAG cache once at the end of the run so repeated addresses in
+    # future runs (and the backfill) skip the remote lookups.
+    if bag_enricher is not None:
+        bag_enricher.save_cache()
 
     if results_processed >= ES_MAX_RESULT_WINDOW and results_processed < results_total:
         logging.warning(

@@ -13,17 +13,44 @@ Among other things this will return:
 - Plot area in m2
 - Status (sold, sold_under_reservation, none)
 - Amenities (boiler, bathtub, renewable_energy, etc.)
-- Construction period
+- Construction period (as far as funda still exposes it; see below)
+- Construction year (`bag_bouwjaar`, enriched from the Dutch BAG registry)
 - Offering type (buy, rent)
 - Neighbourhood stats (Inhabitants, avg. asking price)
 - Listing insights (saves, views)
 
-## Command line options
+### BAG construction year (`bag_bouwjaar`)
+
+Funda removed `construction_period` from its search API around Sept-Oct 2025 (it
+was ~98% populated through Aug 2025 and 0% since Oct 2025). Build era is therefore
+enriched from the authoritative Dutch BAG building registry via PDOK's open APIs
+(Locatieserver geocode + BAG WFS `pand` lookup) and stored in the `bag_bouwjaar`
+column. Enrichment is on by default during a scrape (disable with `--no-bag`) and
+never aborts a scrape if PDOK is unavailable (it stores `NULL` and logs).
+
+Results are cached on disk (default `~/.cache/fundatracker/bag_cache.json`,
+override with `$FUNDA_BAG_CACHE`).
+
+## Command line
+
+```bash
+# Scrape (BAG enrichment on by default)
+python -m fundatracker.cli scrape --postal_code 1011 --km_radius 5
+
+# Backfill bag_bouwjaar for existing rows where it is NULL (resumable, cached).
+# Use --limit for a small dry run first.
+python -m fundatracker.cli backfill --limit 100
+```
+
+The old flag-only form (`fundatracker --postal_code 1011 --km_radius 5`) still
+works and defaults to the scrape command.
+
 | arg | description |
 | --- | ---- |
 | `--postal_code` | any 4 digit postal code  |
 | `--km_radius` | [1,2,5,10,15,30,50,100] |
 | `--publication_date` | ["now-1d","now-3d", "now-5d", "now-10d", "now-30d", "no_preference"] |
+| `--no-bag` | skip BAG bouwjaar enrichment during a scrape |
 
 
 NB. This is just a tool for convenience, so treat it as if you were a regular browser of the site.
