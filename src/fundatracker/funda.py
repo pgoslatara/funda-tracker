@@ -145,7 +145,12 @@ def get_results(
     # Create NDJSON request body (newline-delimited JSON)
     index_line = {"index": "listings-wonen-searcher-alias-prod"}
     query_line = {
-        "id": "search_result_20251211",
+        # Funda versions its stored search templates by date and rotates them,
+        # which retires the previous id (a stale id returns HTTP 400
+        # "Invalid argument"). The current version is exposed on funda.nl as the
+        # Nuxt runtime config `openSearch.queryVersion`; the listings template id
+        # is `search_result_<queryVersion>`. Bump this when funda rotates it.
+        "id": "search_result_20260227",
         "params": query_params,
     }  # Format as NDJSON (each JSON object on a separate line)
     ndjson_body = json.dumps(index_line) + "\n" + json.dumps(query_line) + "\n"
