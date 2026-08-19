@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import unittest
@@ -53,96 +54,114 @@ class TestFundaFunctions(unittest.TestCase):
         self.assertEqual(schema["number_of_bedrooms"], "INTEGER")
         self.assertEqual(schema["price"], "INTEGER")
 
-    @patch("fundatracker.funda.requests.post")
-    @patch("fundatracker.funda.USER_AGENT", "Mozilla/5.0 Test Agent")
-    def test_get_results_success(self, mock_post):
-        """Test get_results function with successful response."""
+    def _search_html(self):
+        """A minimal funda SSR search page: two listings embedded in a Nuxt
+        __NUXT_DATA__ devalue payload (a flat array whose containers hold
+        integer indices into the array)."""
+        devalue = [
+            {"root": 1},  # 0
+            [2, 8],  # 1  array of listing references
+            {  # 2  listing A
+                "id": 3,
+                "publish_date": 4,
+                "object_detail_page_relative_url": 5,
+                "address": 6,
+                "price": 14,
+            },
+            111,  # 3
+            "2026-08-19T06:00:00+02:00",  # 4
+            "/detail/koop/amsterdam/appartement-111/",  # 5
+            {"postal_code": 7, "country": 15},  # 6
+            "1061AB",  # 7
+            {  # 8  listing B
+                "id": 9,
+                "publish_date": 10,
+                "object_detail_page_relative_url": 11,
+                "address": 12,
+                "price": 14,
+            },
+            222,  # 9
+            "2026-08-01T06:00:00+02:00",  # 10
+            "/detail/koop/amsterdam/appartement-222/",  # 11
+            {"postal_code": 13, "country": 15},  # 12
+            "1061CD",  # 13
+            {"selling_price": 16},  # 14  (shared by both listings)
+            "NL",  # 15
+            [17],  # 16  (array elements are themselves references)
+            500000,  # 17
+        ]
+        return (
+            '<html><body><script id="__NUXT_DATA__" type="application/json">'
+            + json.dumps(devalue)
+            + "</script></body></html>"
+        )
 
-        # Mock successful response
+    @patch("fundatracker.funda._search_session.get")
+    def test_get_results_success(self, mock_get):
+        """get_results scrapes the SSR page and reshapes it into hits."""
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.json.return_value = self.sample_response
-        mock_post.return_value = mock_response
+        mock_response.text = self._search_html()
+        mock_get.return_value = mock_response
 
-        result = funda.get_results(postal_code4=1000, km_radius=5)
+        # no_preference => no date cutoff, so both listings are returned
+        result = funda.get_results(postal_code4=1061, km_radius=2)
 
-        # Check that requests.post was called
-        mock_post.assert_called_once()
+        # Only one page is fetched (2 listings < a full page)
+        mock_get.assert_called_once()
 
-        # Check the result
-        self.assertEqual(result, self.sample_response)
+        hits = result["responses"][0]["hits"]["hits"]
+        self.assertEqual(result["responses"][0]["hits"]["total"]["value"], 2)
+        self.assertEqual([h["_id"] for h in hits], ["111", "222"])
+        # _source keeps the OpenSearch document shape parse_funda_results expects
+        self.assertEqual(hits[0]["_source"]["address"]["postal_code"], "1061AB")
+        self.assertEqual(hits[0]["_source"]["price"]["selling_price"], [500000])
 
-        # Check headers were set correctly for new API
-        call_args = mock_post.call_args
-        headers = call_args[1]["headers"]
-        self.assertIn("User-Agent", headers)
-        self.assertIn("accept", headers)
-        self.assertIn("content-type", headers)
-        self.assertIn("Referer", headers)
-        self.assertEqual(headers["User-Agent"], "Mozilla/5.0 Test Agent")
-        self.assertEqual(headers["accept"], "application/json")
-        self.assertEqual(headers["content-type"], "application/json")
-        self.assertEqual(headers["Referer"], "https://www.funda.nl/")
+    @patch("fundatracker.funda._search_session.get")
+    def test_get_results_start_index_short_circuits(self, mock_get):
+        """A non-zero start_index returns nothing (pagination is internal)."""
+        result = funda.get_results(postal_code4=1061, km_radius=2, start_index=100)
+        self.assertEqual(result["responses"][0]["hits"]["total"]["value"], 0)
+        mock_get.assert_not_called()
 
-    @patch("fundatracker.funda.requests.post")
-    def test_get_results_failure(self, mock_post):
-        """Test get_results function with failed response."""
-        # Mock failed response
+    @patch("fundatracker.funda._search_session.get")
+    def test_get_results_failure(self, mock_get):
+        """get_results raises on a non-200 response from funda."""
         mock_response = Mock()
-        mock_response.status_code = 400
-        mock_response.text = "Bad Request"
-        mock_post.return_value = mock_response
+        mock_response.status_code = 403
+        mock_response.text = "Access Denied"
+        mock_get.return_value = mock_response
 
         with self.assertRaises(Exception) as context:
             funda.get_results(postal_code4=1000, km_radius=5)
 
         self.assertIn("Failed to get results from funda", str(context.exception))
-        self.assertIn("400", str(context.exception))
+        self.assertIn("403", str(context.exception))
 
-    @patch("fundatracker.funda.requests.post")
-    def test_get_results_parameters(self, mock_post):
-        """Test get_results function parameter validation and query building."""
+    @patch("fundatracker.funda._search_session.get")
+    def test_get_results_parameters(self, mock_get):
+        """get_results builds the expected funda.nl search URL."""
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.json.return_value = self.sample_response
-        mock_post.return_value = mock_response
+        mock_response.text = self._search_html()
+        mock_get.return_value = mock_response
 
-        # Test with different parameters
         funda.get_results(
             postal_code4=1000,
             km_radius=15,
             publication_date="now-3d",
             offering_type="buy",
-            start_index=50,
         )
 
-        # Verify the request was made
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
+        mock_get.assert_called_once()
 
-        # Check that the request uses NDJSON format (data instead of json)
-        self.assertIn("data", call_args[1])
-        request_body = call_args[1]["data"]
+        from urllib.parse import parse_qs, urlparse
 
-        # Parse the NDJSON format (two lines)
-        lines = request_body.strip().split("\n")
-        self.assertEqual(len(lines), 2)
-
-        import json
-
-        index_line = json.loads(lines[0])
-        query_line = json.loads(lines[1])
-
-        # Check index specification
-        self.assertEqual(index_line["index"], "listings-wonen-searcher-alias-prod")
-
-        # Check query parameters
-        params = query_line["params"]
-        self.assertEqual(params["radius_search"]["path"], "area_with_radius.15")
-        self.assertEqual(params["radius_search"]["id"], "1000-0")
-        self.assertEqual(params["offering_type"], "buy")
-        self.assertEqual(params["publication_date"], {"3": True})
-        self.assertEqual(params["page"]["from"], 50)
+        parsed = urlparse(mock_get.call_args[0][0])
+        query = parse_qs(parsed.query)
+        self.assertEqual(parsed.path, "/zoeken/koop")
+        self.assertEqual(query["selected_area"], ['["1000,15km"]'])
+        self.assertEqual(query["sort"], ['"publish_date_utc_desc"'])
 
     @patch("fundatracker.funda.get_neighbourhood_insights")
     def test_parse_funda_results(self, mock_neighbourhood_insights):

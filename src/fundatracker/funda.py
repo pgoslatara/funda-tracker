@@ -1,7 +1,9 @@
 import datetime
 import json
 import logging
+import re
 import time
+import urllib.parse
 import uuid
 from functools import lru_cache
 from typing import Literal
@@ -84,6 +86,77 @@ def get_funda_schema():
     }
 
 
+# Funda retired its anonymous OpenSearch backend (listing-search-wonen.funda.io):
+# it now returns HTTP 401 "no token provided", and the replacement host
+# (…funda.nl) sits behind Akamai Bot Manager. The public www.funda.nl search
+# pages, however, are server-side rendered and still reachable with curl_cffi's
+# browser impersonation. Each page embeds the same listing objects (the former
+# OpenSearch `_source` documents) in a Nuxt `__NUXT_DATA__` payload, so we scrape
+# those and re-shape them into the `hits.hits[]._source` structure the rest of
+# this module already expects.
+SEARCH_PAGE_SIZE = 15  # funda renders 15 listings per SSR page
+MAX_SEARCH_PAGES = 40  # safety cap (~600 listings) mirroring the ES window cap
+
+# Map publication_date to a "listed within N days" cutoff.
+PUBLICATION_DATE_DAYS = {
+    "now-1d": 1,
+    "now-3d": 3,
+    "now-5d": 5,
+    "now-10d": 10,
+    "now-30d": 30,
+    "no_preference": None,
+}
+
+# One session so Akamai's bot cookies persist across paginated requests.
+_search_session = requests.Session(impersonate="chrome")
+
+
+def _deref_nuxt(ref, data):
+    """Resolve one Nuxt devalue pointer (an index into the flat `data` array).
+
+    devalue stores every value once in a flat array; containers hold integer
+    indices into it. A pointer dereferences exactly once — the value found is
+    the literal (a scalar int is a real number, not a further index). Negative
+    indices are devalue sentinels (undefined/NaN), returned as None.
+    """
+    if not isinstance(ref, int):
+        return _materialise_nuxt(ref, data)
+    if ref < 0 or ref >= len(data):
+        return None
+    return _materialise_nuxt(data[ref], data)
+
+
+def _materialise_nuxt(raw, data):
+    if isinstance(raw, dict):
+        return {k: _deref_nuxt(v, data) for k, v in raw.items()}
+    if isinstance(raw, list):
+        return [_deref_nuxt(x, data) for x in raw]
+    return raw  # scalar literal
+
+
+def _parse_listings_from_html(html):
+    """Extract the listing `_source` documents from a funda SSR search page."""
+    match = re.search(r'id="__NUXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    if not match:
+        return []
+    data = json.loads(match.group(1))
+    # Find the array of listing references: a short int array whose every
+    # element resolves to a dict carrying `object_detail_page_relative_url`.
+    for node in data:
+        if (
+            isinstance(node, list)
+            and 1 <= len(node) <= 40
+            and all(isinstance(x, int) for x in node)
+        ):
+            candidates = [data[x] for x in node if 0 <= x < len(data)]
+            if candidates and all(
+                isinstance(c, dict) and "object_detail_page_relative_url" in c
+                for c in candidates
+            ):
+                return [_materialise_nuxt(data[ref], data) for ref in node]
+    return []
+
+
 def get_results(
     postal_code4: Literal[1000, 9999],
     km_radius: Literal[1, 2, 5, 10, 15, 30, 50, 100, None] = 1,
@@ -95,82 +168,80 @@ def get_results(
     page_size: int = 100,
 ):
     """
-    Get property listings from Funda API using the new endpoint format.
+    Get property listings by scraping funda.nl's server-side-rendered search
+    pages, returned in the same shape as the former OpenSearch API response.
+
+    All matching listings (newest first, filtered to `publication_date`) are
+    returned in a single call, so pagination happens here rather than in the
+    caller: any call with a non-zero `start_index` returns no hits.
 
     Args:
         postal_code4: 4-digit postal code for location search
         km_radius: Search radius in kilometers
-        publication_date: Filter by publication date
-        offering_type: Type of offering (buy/rent/all)
-        start_index: Starting index for pagination
-        page_size: Number of results per page
+        publication_date: Only return listings published within this window
+        offering_type: Type of offering (buy/rent)
+        start_index: Non-zero short-circuits to an empty response (see above)
+        page_size: Unused; kept for signature compatibility
 
     Returns:
-        dict: API response containing property listings
+        dict: {"responses": [{"hits": {"total": {"value": N}, "hits": [...]}}]}
     """
-    base_url = "https://listing-search-wonen.funda.io/_msearch/template"
+    if start_index:
+        return {"responses": [{"hits": {"total": {"value": 0}, "hits": []}}]}
 
-    # Map publication_date to new format
-    publication_date_map = {
-        "now-1d": {"1": True},
-        "now-3d": {"3": True},
-        "now-5d": {"5": True},
-        "now-10d": {"10": True},
-        "now-30d": {"30": True},
-        "no_preference": {},
-    }
+    days = PUBLICATION_DATE_DAYS.get(publication_date)
+    cutoff = None
+    if days is not None:
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days)
 
-    # Build query parameters for new API format
-    query_params = {
-        "collapse_projects": False,
-        "radius_search": {
-            "index": "geo-wonen-alias-prod",
-            "id": f"{postal_code4}-0",
-            "path": f"area_with_radius.{km_radius}"
-            if km_radius
-            else "area_with_radius.1",
-        },
-        "offering_type": offering_type,
-        "project_phase": {},
-        "publication_date": publication_date_map.get(publication_date, {}),
-        "availability": ["available", "negotiations", "unavailable"],
-        "free_text_search": "",
-        "page": {"from": start_index},  # Remove size parameter to match sample
-        "zoning": ["residential", "recreational"],
-        "type": ["single", "group"],
-        "sort": {"field": None, "order": None},
-        "open_house": {},
-    }
+    # Postal code plus optional radius, e.g. ["1061,2km"].
+    area = f"{postal_code4},{km_radius}km" if km_radius else str(postal_code4)
+    path = "koop" if offering_type == "buy" else "huur"
+    base_url = f"https://www.funda.nl/zoeken/{path}"
 
-    # Create NDJSON request body (newline-delimited JSON)
-    index_line = {"index": "listings-wonen-searcher-alias-prod"}
-    query_line = {
-        # Funda versions its stored search templates by date and rotates them,
-        # which retires the previous id (a stale id returns HTTP 400
-        # "Invalid argument"). The current version is exposed on funda.nl as the
-        # Nuxt runtime config `openSearch.queryVersion`; the listings template id
-        # is `search_result_<queryVersion>`. Bump this when funda rotates it.
-        "id": "search_result_20260227",
-        "params": query_params,
-    }  # Format as NDJSON (each JSON object on a separate line)
-    ndjson_body = json.dumps(index_line) + "\n" + json.dumps(query_line) + "\n"
+    hits = []
+    for page in range(1, MAX_SEARCH_PAGES + 1):
+        params = {
+            "selected_area": json.dumps([area]),
+            # Newest first so we can stop paging once past the date cutoff.
+            "sort": json.dumps("publish_date_utc_desc"),
+        }
+        if page > 1:
+            params["search_result"] = page
+        url = f"{base_url}?{urllib.parse.urlencode(params)}"
 
-    headers = {
-        "accept": "application/json",
-        "content-type": "application/json",
-        "cache-control" : "no-cache",
-        "Referer": "https://www.funda.nl/",
-        "User-Agent": USER_AGENT,
-    }
+        headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": "https://www.funda.nl/",
+            "User-Agent": USER_AGENT,
+        }
+        res = _search_session.get(url, headers=headers, impersonate="chrome")
+        if res.status_code != 200:
+            raise Exception(
+                f"Failed to get results from funda. Status code: {res.status_code}. Response: {res.text}"
+            )
 
-    res = requests.post(base_url, data=ndjson_body, headers=headers, impersonate="chrome")
+        listings = _parse_listings_from_html(res.text)
+        if not listings:
+            break
 
-    if res.status_code != 200:
-        raise Exception(
-            f"Failed to get results from funda. Status code: {res.status_code}. Response: {res.text}"
-        )
+        reached_cutoff = False
+        for listing in listings:
+            publish_date = listing.get("publish_date")
+            if cutoff is not None and publish_date:
+                try:
+                    if datetime.datetime.fromisoformat(publish_date) < cutoff:
+                        reached_cutoff = True
+                        break
+                except ValueError:
+                    pass
+            hits.append({"_id": str(listing.get("id")), "_source": listing})
 
-    return res.json()
+        # Stop once we hit an older listing or funda runs out of pages.
+        if reached_cutoff or len(listings) < SEARCH_PAGE_SIZE:
+            break
+
+    return {"responses": [{"hits": {"total": {"value": len(hits)}, "hits": hits}}]}
 
 
 @lru_cache
@@ -388,7 +459,10 @@ def tracker(
     results_processed = 0
     results_total = 1
     page_size = 100
-    while results_processed < results_total and results_processed + page_size <= ES_MAX_RESULT_WINDOW:
+    while (
+        results_processed < results_total
+        and results_processed + page_size <= ES_MAX_RESULT_WINDOW
+    ):
         res = get_results(
             postal_code4=postal_code,
             km_radius=km_radius,
