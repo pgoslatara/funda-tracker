@@ -25,6 +25,11 @@ class TestFundaFunctions(unittest.TestCase):
 
         funda.get_listing_insights.cache_clear()
 
+        # Skip the homepage warm-up so tests count only search requests.
+        warm_up_patcher = patch("fundatracker.funda._warm_up_search_session")
+        self.mock_warm_up = warm_up_patcher.start()
+        self.addCleanup(warm_up_patcher.stop)
+
     def test_get_funda_schema(self):
         """Test that get_funda_schema returns expected schema structure."""
         schema = funda.get_funda_schema()
@@ -116,6 +121,31 @@ class TestFundaFunctions(unittest.TestCase):
         # _source keeps the OpenSearch document shape parse_funda_results expects
         self.assertEqual(hits[0]["_source"]["address"]["postal_code"], "1061AB")
         self.assertEqual(hits[0]["_source"]["price"]["selling_price"], [500000])
+
+    @patch("fundatracker.funda._search_session.get")
+    def test_get_results_warms_up_session(self, mock_get):
+        """get_results warms the session up before the first search request."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = self._search_html()
+        mock_get.return_value = mock_response
+
+        funda.get_results(postal_code4=1061, km_radius=2)
+
+        self.mock_warm_up.assert_called_once()
+
+    @patch("fundatracker.funda._search_session.get")
+    def test_get_results_does_not_override_user_agent(self, mock_get):
+        """The impersonated User-Agent must not be replaced (Akamai checks it)."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = self._search_html()
+        mock_get.return_value = mock_response
+
+        funda.get_results(postal_code4=1061, km_radius=2)
+
+        headers = mock_get.call_args.kwargs.get("headers", {})
+        self.assertNotIn("user-agent", {key.lower() for key in headers})
 
     @patch("fundatracker.funda._search_session.get")
     def test_get_results_start_index_short_circuits(self, mock_get):
@@ -372,6 +402,30 @@ class TestFundaFunctions(unittest.TestCase):
         self.assertEqual(parsed["surrounding"], "park,school")
         self.assertEqual(parsed["construction_date_range"], "1980~1990")
         self.assertEqual(parsed["description"], "Mooie woning")
+
+
+class TestWarmUpSearchSession(unittest.TestCase):
+    def setUp(self):
+        funda._search_session_warmed = False
+        self.addCleanup(setattr, funda, "_search_session_warmed", False)
+
+    @patch("fundatracker.funda._search_session.get")
+    def test_warm_up_visits_homepage_once(self, mock_get):
+        """The homepage is fetched on the first call only."""
+        mock_get.return_value = Mock(status_code=200)
+
+        funda._warm_up_search_session()
+        funda._warm_up_search_session()
+
+        mock_get.assert_called_once_with(funda.FUNDA_HOME_URL)
+
+    @patch("fundatracker.funda._search_session.get")
+    def test_warm_up_failure_is_not_fatal(self, mock_get):
+        """A non-200 warm-up only logs; the search itself decides success."""
+        mock_get.return_value = Mock(status_code=403)
+
+        with self.assertLogs(level="WARNING"):
+            funda._warm_up_search_session()
 
 
 if __name__ == "__main__":

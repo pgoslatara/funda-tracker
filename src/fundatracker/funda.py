@@ -15,8 +15,6 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
-
 run_id = str(uuid.uuid4())
 neighbourhood_insights = {}
 
@@ -108,7 +106,23 @@ PUBLICATION_DATE_DAYS = {
 }
 
 # One session so Akamai's bot cookies persist across paginated requests.
+# Never override User-Agent: curl_cffi sends the UA matching its impersonated
+# TLS/HTTP2 fingerprint, and Akamai rejects requests where the two disagree.
 _search_session = requests.Session(impersonate="chrome")
+_search_session_warmed = False
+
+FUNDA_HOME_URL = "https://www.funda.nl/"
+
+
+def _warm_up_search_session():
+    """Visit the homepage once so Akamai's cookies are set before searching."""
+    global _search_session_warmed
+    if _search_session_warmed:
+        return
+    res = _search_session.get(FUNDA_HOME_URL)
+    if res.status_code != 200:
+        logging.warning(f"funda homepage warm-up returned {res.status_code}")
+    _search_session_warmed = True
 
 
 def _deref_nuxt(ref, data):
@@ -199,6 +213,8 @@ def get_results(
     path = "koop" if offering_type == "buy" else "huur"
     base_url = f"https://www.funda.nl/zoeken/{path}"
 
+    _warm_up_search_session()
+
     hits = []
     for page in range(1, MAX_SEARCH_PAGES + 1):
         params = {
@@ -212,10 +228,9 @@ def get_results(
 
         headers = {
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": "https://www.funda.nl/",
-            "User-Agent": USER_AGENT,
+            "Referer": FUNDA_HOME_URL,
         }
-        res = _search_session.get(url, headers=headers, impersonate="chrome")
+        res = _search_session.get(url, headers=headers)
         if res.status_code != 200:
             raise Exception(
                 f"Failed to get results from funda. Status code: {res.status_code}. Response: {res.text}"
@@ -248,10 +263,7 @@ def get_results(
 def get_listing_insights(listing_id):
     url = f"https://marketinsights.funda.io/v1/objectinsights/{listing_id}"
 
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Authorization": get_authorization_key(),
-    }
+    headers = {"Authorization": get_authorization_key()}
 
     res = requests.get(url, headers=headers, impersonate="chrome")
 
@@ -277,9 +289,7 @@ def get_neighbourhood_insights(city, neighbourhood):
 
     url = f"https://marketinsights.funda.io/v2/LocalInsights/preview/{city}/{neighbourhood}"
 
-    headers = {"User-Agent": USER_AGENT}
-
-    res = requests.get(url, headers=headers, impersonate="chrome")
+    res = requests.get(url, impersonate="chrome")
 
     if res.status_code == 200:
         neighbourhood_insights[neighbourhood_key] = res.json()
