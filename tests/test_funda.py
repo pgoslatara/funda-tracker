@@ -169,6 +169,20 @@ class TestFundaFunctions(unittest.TestCase):
         self.assertIn("403", str(context.exception))
 
     @patch("fundatracker.funda._search_session.get")
+    def test_get_results_failure_resets_session(self, mock_get):
+        """A blocked search discards the session so a retry starts clean."""
+        mock_get.return_value = Mock(status_code=403, text="Access Denied")
+        blocked_session = funda._search_session
+        funda._search_session_warmed = True
+        self.addCleanup(setattr, funda, "_search_session_warmed", False)
+
+        with self.assertRaisesRegex(Exception, "Status code: 403"):
+            funda.get_results(postal_code4=1000, km_radius=5)
+
+        self.assertIsNot(funda._search_session, blocked_session)
+        self.assertFalse(funda._search_session_warmed)
+
+    @patch("fundatracker.funda._search_session.get")
     def test_get_results_parameters(self, mock_get):
         """get_results builds the expected funda.nl search URL."""
         mock_response = Mock()

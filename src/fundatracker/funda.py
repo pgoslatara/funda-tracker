@@ -125,6 +125,18 @@ def _warm_up_search_session():
     _search_session_warmed = True
 
 
+def _reset_search_session():
+    """Discard the session so the next call starts without Akamai's cookies.
+
+    Once Akamai blocks a session its cookies stay flagged, so retrying with the
+    same session keeps returning 403.
+    """
+    global _search_session, _search_session_warmed
+    _search_session.close()
+    _search_session = requests.Session(impersonate="chrome")
+    _search_session_warmed = False
+
+
 def _deref_nuxt(ref, data):
     """Resolve one Nuxt devalue pointer (an index into the flat `data` array).
 
@@ -232,6 +244,7 @@ def get_results(
         }
         res = _search_session.get(url, headers=headers)
         if res.status_code != 200:
+            _reset_search_session()
             raise Exception(
                 f"Failed to get results from funda. Status code: {res.status_code}. Response: {res.text}"
             )
