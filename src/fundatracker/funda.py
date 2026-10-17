@@ -108,7 +108,11 @@ PUBLICATION_DATE_DAYS = {
 # One session so Akamai's bot cookies persist across paginated requests.
 # Never override User-Agent: curl_cffi sends the UA matching its impersonated
 # TLS/HTTP2 fingerprint, and Akamai rejects requests where the two disagree.
-_search_session = requests.Session(impersonate="chrome")
+# After a block, the next session impersonates the next browser in this list in
+# case Akamai has flagged one fingerprint rather than the client's IP.
+SEARCH_IMPERSONATE_TARGETS = ("chrome", "safari260", "firefox147")
+_search_impersonate_index = 0
+_search_session = requests.Session(impersonate=SEARCH_IMPERSONATE_TARGETS[0])
 _search_session_warmed = False
 
 FUNDA_HOME_URL = "https://www.funda.nl/"
@@ -129,11 +133,17 @@ def _reset_search_session():
     """Discard the session so the next call starts without Akamai's cookies.
 
     Once Akamai blocks a session its cookies stay flagged, so retrying with the
-    same session keeps returning 403.
+    same session keeps returning 403. The new session also switches to the next
+    browser fingerprint in SEARCH_IMPERSONATE_TARGETS.
     """
-    global _search_session, _search_session_warmed
+    global _search_session, _search_session_warmed, _search_impersonate_index
     _search_session.close()
-    _search_session = requests.Session(impersonate="chrome")
+    _search_impersonate_index = (_search_impersonate_index + 1) % len(
+        SEARCH_IMPERSONATE_TARGETS
+    )
+    impersonate = SEARCH_IMPERSONATE_TARGETS[_search_impersonate_index]
+    logging.info(f"Retrying funda search impersonating {impersonate}")
+    _search_session = requests.Session(impersonate=impersonate)
     _search_session_warmed = False
 
 

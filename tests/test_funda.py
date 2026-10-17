@@ -182,6 +182,19 @@ class TestFundaFunctions(unittest.TestCase):
         self.assertIsNot(funda._search_session, blocked_session)
         self.assertFalse(funda._search_session_warmed)
 
+    @patch("fundatracker.funda.requests.Session")
+    def test_reset_search_session_rotates_impersonation(self, mock_session):
+        """Each reset impersonates the next browser, wrapping back to the first."""
+        self.addCleanup(setattr, funda, "_search_session", funda._search_session)
+        self.addCleanup(setattr, funda, "_search_impersonate_index", 0)
+        funda._search_impersonate_index = 0
+        funda._search_session = Mock()
+        targets = funda.SEARCH_IMPERSONATE_TARGETS
+
+        for expected in [*targets[1:], targets[0]]:
+            funda._reset_search_session()
+            mock_session.assert_called_with(impersonate=expected)
+
     @patch("fundatracker.funda._search_session.get")
     def test_get_results_parameters(self, mock_get):
         """get_results builds the expected funda.nl search URL."""
