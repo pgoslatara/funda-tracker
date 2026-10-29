@@ -1,10 +1,13 @@
+import atexit
 import datetime
+import importlib.util
 import json
 import logging
 import re
 import time
 import urllib.parse
 import uuid
+from contextlib import ExitStack
 from functools import lru_cache
 from typing import Literal
 
@@ -147,6 +150,86 @@ def _reset_search_session():
     _search_session_warmed = False
 
 
+# Akamai Bot Manager intermittently 403s every curl_cffi fingerprint on the search
+# pages, for hours at a time, while a real browser (which runs Akamai's sensor
+# script) is let through. On a block, fall back to headless Camoufox for the rest
+# of the process. Camoufox is optional: install the "browser" extra.
+_use_browser = False
+_browser_stack = None
+_browser_page = None
+
+
+def _close_browser():
+    """Shut down the headless browser, if one is running."""
+    global _browser_stack, _browser_page
+    if _browser_stack is not None:
+        _browser_stack.close()
+    _browser_stack = None
+    _browser_page = None
+
+
+atexit.register(_close_browser)
+
+
+def _browser_available() -> bool:
+    return importlib.util.find_spec("camoufox") is not None
+
+
+def _fetch_search_page_with_browser(url: str) -> tuple[int, str]:
+    """Load a search page in headless Camoufox and return (status, html).
+
+    The browser is launched on first use and reused for later pages so Akamai's
+    cookies persist. A blocked browser is closed so the next call launches a new
+    one with a fresh fingerprint.
+    """
+    global _browser_stack, _browser_page
+    if _browser_page is None:
+        from camoufox.sync_api import Camoufox
+
+        _browser_stack = ExitStack()
+        browser = _browser_stack.enter_context(Camoufox(headless=True, geoip=True))
+        _browser_page = browser.new_page()
+    response = _browser_page.goto(
+        url, referer=FUNDA_HOME_URL, wait_until="domcontentloaded"
+    )
+    status = response.status if response else 0
+    if status != 200:
+        html = _browser_page.content()
+        _close_browser()
+        return status, html
+    _browser_page.wait_for_selector("#__NUXT_DATA__", state="attached")
+    return status, _browser_page.content()
+
+
+def _fetch_search_page(url: str) -> str:
+    """Fetch a search page with curl_cffi, falling back to Camoufox on a block."""
+    global _use_browser
+    if not _use_browser:
+        headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": FUNDA_HOME_URL,
+        }
+        res = _search_session.get(url, headers=headers)
+        if res.status_code == 200:
+            return res.text
+        _reset_search_session()
+        if not _browser_available():
+            raise Exception(
+                f"Failed to get results from funda. Status code: {res.status_code}. Response: {res.text}"
+            )
+        logging.warning(
+            f"funda search returned {res.status_code}, switching to headless Camoufox"
+        )
+        _use_browser = True
+
+    status, html = _fetch_search_page_with_browser(url)
+    if status != 200:
+        raise Exception(
+            f"Failed to get results from funda. Status code: {status}. Response: {html}"
+        )
+    return html
+
+
 def _deref_nuxt(ref, data):
     """Resolve one Nuxt devalue pointer (an index into the flat `data` array).
 
@@ -235,7 +318,8 @@ def get_results(
     path = "koop" if offering_type == "buy" else "huur"
     base_url = f"https://www.funda.nl/zoeken/{path}"
 
-    _warm_up_search_session()
+    if not _use_browser:
+        _warm_up_search_session()
 
     hits = []
     for page in range(1, MAX_SEARCH_PAGES + 1):
@@ -248,18 +332,7 @@ def get_results(
             params["search_result"] = page
         url = f"{base_url}?{urllib.parse.urlencode(params)}"
 
-        headers = {
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": FUNDA_HOME_URL,
-        }
-        res = _search_session.get(url, headers=headers)
-        if res.status_code != 200:
-            _reset_search_session()
-            raise Exception(
-                f"Failed to get results from funda. Status code: {res.status_code}. Response: {res.text}"
-            )
-
-        listings = _parse_listings_from_html(res.text)
+        listings = _parse_listings_from_html(_fetch_search_page(url))
         if not listings:
             break
 

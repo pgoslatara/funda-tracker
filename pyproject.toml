@@ -14,6 +14,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+browser = [
+    "camoufox[geoip]>=0.5.8",
+]
 dev = [
     "pytest>=7.0.0",
     "pre-commit>=3.0.0",

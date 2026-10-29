@@ -30,6 +30,14 @@ class TestFundaFunctions(unittest.TestCase):
         self.mock_warm_up = warm_up_patcher.start()
         self.addCleanup(warm_up_patcher.stop)
 
+        # Default to no Camoufox so a blocked search raises, as without the extra.
+        browser_patcher = patch(
+            "fundatracker.funda._browser_available", return_value=False
+        )
+        self.mock_browser_available = browser_patcher.start()
+        self.addCleanup(browser_patcher.stop)
+        self.addCleanup(setattr, funda, "_use_browser", False)
+
     def test_get_funda_schema(self):
         """Test that get_funda_schema returns expected schema structure."""
         schema = funda.get_funda_schema()
@@ -181,6 +189,39 @@ class TestFundaFunctions(unittest.TestCase):
 
         self.assertIsNot(funda._search_session, blocked_session)
         self.assertFalse(funda._search_session_warmed)
+
+    @patch("fundatracker.funda._fetch_search_page_with_browser")
+    @patch("fundatracker.funda._search_session.get")
+    def test_get_results_falls_back_to_browser(self, mock_get, mock_browser):
+        """A blocked curl_cffi search is retried in Camoufox, which then sticks."""
+        self.mock_browser_available.return_value = True
+        mock_get.return_value = Mock(status_code=403, text="Access Denied")
+        mock_browser.return_value = (200, self._search_html())
+
+        result = funda.get_results(postal_code4=1061, km_radius=2)
+
+        self.assertEqual(result["responses"][0]["hits"]["total"]["value"], 2)
+        mock_get.assert_called_once()
+        mock_browser.assert_called_once_with(mock_get.call_args.args[0])
+        self.assertTrue(funda._use_browser)
+
+        # Later searches go straight to the browser, skipping the warm-up.
+        self.mock_warm_up.reset_mock()
+        funda.get_results(postal_code4=1061, km_radius=2)
+        mock_get.assert_called_once()
+        self.assertEqual(mock_browser.call_count, 2)
+        self.mock_warm_up.assert_not_called()
+
+    @patch("fundatracker.funda._fetch_search_page_with_browser")
+    @patch("fundatracker.funda._search_session.get")
+    def test_get_results_browser_failure(self, mock_get, mock_browser):
+        """get_results raises when the browser is blocked too."""
+        self.mock_browser_available.return_value = True
+        mock_get.return_value = Mock(status_code=403, text="Access Denied")
+        mock_browser.return_value = (403, "Access Denied")
+
+        with self.assertRaisesRegex(Exception, "Status code: 403"):
+            funda.get_results(postal_code4=1061, km_radius=2)
 
     @patch("fundatracker.funda.requests.Session")
     def test_reset_search_session_rotates_impersonation(self, mock_session):
