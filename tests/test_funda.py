@@ -223,6 +223,53 @@ class TestFundaFunctions(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "Status code: 403"):
             funda.get_results(postal_code4=1061, km_radius=2)
 
+    def _browser_page(self, goto_side_effect):
+        """Install a fake Camoufox page whose goto behaves as given."""
+        page = Mock()
+        page.goto.side_effect = goto_side_effect
+        page.content.return_value = self._search_html()
+        funda._browser_page = page
+        self.addCleanup(setattr, funda, "_browser_page", None)
+        self.addCleanup(setattr, funda, "_browser_stack", None)
+        return page
+
+    @patch("fundatracker.funda.time.sleep")
+    def test_browser_retries_aborted_navigation(self, mock_sleep):
+        """A navigation aborted by the page is retried once the page settles."""
+        page = self._browser_page(
+            [Exception("Page.goto: NS_BINDING_ABORTED"), Mock(status=200)]
+        )
+
+        status, html = funda._fetch_search_page_with_browser("https://example/")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(html, self._search_html())
+        self.assertEqual(page.goto.call_count, 2)
+        page.wait_for_load_state.assert_called_once()
+        mock_sleep.assert_called_once()
+        self.assertIs(funda._browser_page, page)
+
+    @patch("fundatracker.funda.time.sleep")
+    def test_browser_gives_up_after_repeated_aborts(self, mock_sleep):
+        """Repeated aborts raise and close the browser for a fresh fingerprint."""
+        page = self._browser_page(Exception("Page.goto: NS_BINDING_ABORTED"))
+
+        with self.assertRaisesRegex(Exception, "NS_BINDING_ABORTED"):
+            funda._fetch_search_page_with_browser("https://example/")
+
+        self.assertEqual(page.goto.call_count, funda.BROWSER_NAVIGATION_ATTEMPTS)
+        self.assertIsNone(funda._browser_page)
+
+    def test_browser_other_errors_are_not_retried(self):
+        """Errors other than an aborted navigation raise at once and close the browser."""
+        page = self._browser_page(Exception("Page.goto: Timeout 30000ms exceeded"))
+
+        with self.assertRaisesRegex(Exception, "Timeout"):
+            funda._fetch_search_page_with_browser("https://example/")
+
+        page.goto.assert_called_once()
+        self.assertIsNone(funda._browser_page)
+
     @patch("fundatracker.funda.requests.Session")
     def test_reset_search_session_rotates_impersonation(self, mock_session):
         """Each reset impersonates the next browser, wrapping back to the first."""

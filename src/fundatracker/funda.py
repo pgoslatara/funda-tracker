@@ -175,30 +175,68 @@ def _browser_available() -> bool:
     return importlib.util.find_spec("camoufox") is not None
 
 
+# Firefox aborts page.goto with NS_BINDING_ABORTED when the page starts its own
+# navigation first, e.g. Akamai's sensor script reloading the page once it has set
+# its cookie. The reload then lands on the real page, so wait for it to settle and
+# navigate again.
+BROWSER_NAVIGATION_ABORTED = "NS_BINDING_ABORTED"
+BROWSER_NAVIGATION_ATTEMPTS = 3
+BROWSER_NAVIGATION_RETRY_SECONDS = 5
+BROWSER_SETTLE_TIMEOUT_MS = 30_000
+
+
+def _goto_search_page(url: str):
+    """Navigate the browser to url, retrying when the page aborts the navigation."""
+    for attempt in range(1, BROWSER_NAVIGATION_ATTEMPTS + 1):
+        try:
+            return _browser_page.goto(
+                url, referer=FUNDA_HOME_URL, wait_until="domcontentloaded"
+            )
+        except Exception as exc:
+            if (
+                BROWSER_NAVIGATION_ABORTED not in str(exc)
+                or attempt == BROWSER_NAVIGATION_ATTEMPTS
+            ):
+                raise
+            logging.warning(
+                f"funda search navigation aborted by the page (attempt {attempt}"
+                f"/{BROWSER_NAVIGATION_ATTEMPTS}), retrying"
+            )
+            try:
+                _browser_page.wait_for_load_state(
+                    "load", timeout=BROWSER_SETTLE_TIMEOUT_MS
+                )
+            except Exception as settle_exc:
+                logging.warning(f"funda search page did not settle: {settle_exc}")
+            time.sleep(BROWSER_NAVIGATION_RETRY_SECONDS)
+
+
 def _fetch_search_page_with_browser(url: str) -> tuple[int, str]:
     """Load a search page in headless Camoufox and return (status, html).
 
     The browser is launched on first use and reused for later pages so Akamai's
-    cookies persist. A blocked browser is closed so the next call launches a new
-    one with a fresh fingerprint.
+    cookies persist. A blocked or failing browser is closed so the next call
+    launches a new one with a fresh fingerprint.
     """
     global _browser_stack, _browser_page
-    if _browser_page is None:
-        from camoufox.sync_api import Camoufox
+    try:
+        if _browser_page is None:
+            from camoufox.sync_api import Camoufox
 
-        _browser_stack = ExitStack()
-        browser = _browser_stack.enter_context(Camoufox(headless=True, geoip=True))
-        _browser_page = browser.new_page()
-    response = _browser_page.goto(
-        url, referer=FUNDA_HOME_URL, wait_until="domcontentloaded"
-    )
-    status = response.status if response else 0
-    if status != 200:
-        html = _browser_page.content()
+            _browser_stack = ExitStack()
+            browser = _browser_stack.enter_context(Camoufox(headless=True, geoip=True))
+            _browser_page = browser.new_page()
+        response = _goto_search_page(url)
+        status = response.status if response else 0
+        if status != 200:
+            html = _browser_page.content()
+            _close_browser()
+            return status, html
+        _browser_page.wait_for_selector("#__NUXT_DATA__", state="attached")
+        return status, _browser_page.content()
+    except Exception:
         _close_browser()
-        return status, html
-    _browser_page.wait_for_selector("#__NUXT_DATA__", state="attached")
-    return status, _browser_page.content()
+        raise
 
 
 def _fetch_search_page(url: str) -> str:
