@@ -184,13 +184,29 @@ BROWSER_NAVIGATION_ATTEMPTS = 3
 BROWSER_NAVIGATION_RETRY_SECONDS = 5
 BROWSER_SETTLE_TIMEOUT_MS = 30_000
 
+# Akamai's 403 "Access Denied" page still loads its sensor script, which posts
+# telemetry and validates the _abck cookie. A browser that waits for the sensor
+# and asks again is often let through, while a cold browser that deep-links to a
+# search page (no homepage visit, no cookies) is not. So warm the browser up on
+# the homepage, and on a 403 retry in the same browser before giving up.
+BROWSER_BLOCKED_ATTEMPTS = 3
+BROWSER_BLOCKED_RETRY_SECONDS = 10
 
-def _goto_search_page(url: str):
+
+def _wait_for_page_to_settle(state: str) -> None:
+    """Wait for the page to reach a load state, logging rather than raising."""
+    try:
+        _browser_page.wait_for_load_state(state, timeout=BROWSER_SETTLE_TIMEOUT_MS)
+    except Exception as exc:
+        logging.warning(f"funda page did not reach {state}: {exc}")
+
+
+def _goto_page(url: str, referer: str | None = None):
     """Navigate the browser to url, retrying when the page aborts the navigation."""
     for attempt in range(1, BROWSER_NAVIGATION_ATTEMPTS + 1):
         try:
             return _browser_page.goto(
-                url, referer=FUNDA_HOME_URL, wait_until="domcontentloaded"
+                url, referer=referer, wait_until="domcontentloaded"
             )
         except Exception as exc:
             if (
@@ -199,24 +215,34 @@ def _goto_search_page(url: str):
             ):
                 raise
             logging.warning(
-                f"funda search navigation aborted by the page (attempt {attempt}"
+                f"funda navigation aborted by the page (attempt {attempt}"
                 f"/{BROWSER_NAVIGATION_ATTEMPTS}), retrying"
             )
-            try:
-                _browser_page.wait_for_load_state(
-                    "load", timeout=BROWSER_SETTLE_TIMEOUT_MS
-                )
-            except Exception as settle_exc:
-                logging.warning(f"funda search page did not settle: {settle_exc}")
+            _wait_for_page_to_settle("load")
             time.sleep(BROWSER_NAVIGATION_RETRY_SECONDS)
+
+
+def _warm_up_browser() -> None:
+    """Visit the homepage so Akamai's sensor runs and sets cookies before searching."""
+    try:
+        response = _goto_page(FUNDA_HOME_URL)
+        status = response.status if response else 0
+        if status != 200:
+            logging.warning(f"funda homepage warm-up in Camoufox returned {status}")
+        _wait_for_page_to_settle("networkidle")
+    except Exception as exc:
+        # The search may still succeed, so a failed warm-up is not fatal.
+        logging.warning(f"funda homepage warm-up in Camoufox failed: {exc}")
 
 
 def _fetch_search_page_with_browser(url: str) -> tuple[int, str]:
     """Load a search page in headless Camoufox and return (status, html).
 
-    The browser is launched on first use and reused for later pages so Akamai's
-    cookies persist. A blocked or failing browser is closed so the next call
-    launches a new one with a fresh fingerprint.
+    The browser is launched (and warmed up on the homepage) on first use and
+    reused for later pages so Akamai's cookies persist. A blocked page is retried
+    in the same browser once the sensor script has had time to run. A browser that
+    stays blocked, or fails, is closed so the next call launches a new one with a
+    fresh fingerprint.
     """
     global _browser_stack, _browser_page
     try:
@@ -226,12 +252,22 @@ def _fetch_search_page_with_browser(url: str) -> tuple[int, str]:
             _browser_stack = ExitStack()
             browser = _browser_stack.enter_context(Camoufox(headless=True, geoip=True))
             _browser_page = browser.new_page()
-        response = _goto_search_page(url)
-        status = response.status if response else 0
-        if status != 200:
-            html = _browser_page.content()
-            _close_browser()
-            return status, html
+            _warm_up_browser()
+        for attempt in range(1, BROWSER_BLOCKED_ATTEMPTS + 1):
+            response = _goto_page(url, referer=FUNDA_HOME_URL)
+            status = response.status if response else 0
+            if status == 200:
+                break
+            if attempt == BROWSER_BLOCKED_ATTEMPTS:
+                html = _browser_page.content()
+                _close_browser()
+                return status, html
+            logging.warning(
+                f"funda search in Camoufox returned {status} (attempt {attempt}"
+                f"/{BROWSER_BLOCKED_ATTEMPTS}), letting Akamai's sensor run and retrying"
+            )
+            _wait_for_page_to_settle("networkidle")
+            time.sleep(BROWSER_BLOCKED_RETRY_SECONDS)
         _browser_page.wait_for_selector("#__NUXT_DATA__", state="attached")
         return status, _browser_page.content()
     except Exception:

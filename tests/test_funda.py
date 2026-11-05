@@ -260,6 +260,58 @@ class TestFundaFunctions(unittest.TestCase):
         self.assertEqual(page.goto.call_count, funda.BROWSER_NAVIGATION_ATTEMPTS)
         self.assertIsNone(funda._browser_page)
 
+    @patch("fundatracker.funda.time.sleep")
+    def test_browser_retries_blocked_search_in_same_browser(self, mock_sleep):
+        """A 403 is retried in the same browser once Akamai's sensor has run."""
+        page = self._browser_page([Mock(status=403), Mock(status=200)])
+
+        status, html = funda._fetch_search_page_with_browser("https://example/")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(html, self._search_html())
+        self.assertEqual(page.goto.call_count, 2)
+        page.wait_for_load_state.assert_called_once_with(
+            "networkidle", timeout=funda.BROWSER_SETTLE_TIMEOUT_MS
+        )
+        mock_sleep.assert_called_once_with(funda.BROWSER_BLOCKED_RETRY_SECONDS)
+        self.assertIs(funda._browser_page, page)
+
+    @patch("fundatracker.funda.time.sleep")
+    def test_browser_gives_up_when_blocked_repeatedly(self, mock_sleep):
+        """A browser still blocked after every attempt is closed and the 403 returned."""
+        page = self._browser_page(lambda *args, **kwargs: Mock(status=403))
+        page.content.return_value = "Access Denied"
+
+        status, html = funda._fetch_search_page_with_browser("https://example/")
+
+        self.assertEqual(status, 403)
+        self.assertEqual(html, "Access Denied")
+        self.assertEqual(page.goto.call_count, funda.BROWSER_BLOCKED_ATTEMPTS)
+        self.assertEqual(mock_sleep.call_count, funda.BROWSER_BLOCKED_ATTEMPTS - 1)
+        self.assertIsNone(funda._browser_page)
+
+    def test_browser_warm_up_visits_homepage(self):
+        """The warm-up loads the homepage and waits for the sensor's requests."""
+        page = self._browser_page([Mock(status=200)])
+
+        funda._warm_up_browser()
+
+        page.goto.assert_called_once_with(
+            funda.FUNDA_HOME_URL, referer=None, wait_until="domcontentloaded"
+        )
+        page.wait_for_load_state.assert_called_once_with(
+            "networkidle", timeout=funda.BROWSER_SETTLE_TIMEOUT_MS
+        )
+
+    def test_browser_warm_up_failure_is_not_fatal(self):
+        """A failing warm-up is logged, leaving the search to decide the outcome."""
+        self._browser_page(Exception("Page.goto: Timeout 30000ms exceeded"))
+
+        with self.assertLogs(level="WARNING") as logs:
+            funda._warm_up_browser()
+
+        self.assertIn("warm-up in Camoufox failed", logs.output[0])
+
     def test_browser_other_errors_are_not_retried(self):
         """Errors other than an aborted navigation raise at once and close the browser."""
         page = self._browser_page(Exception("Page.goto: Timeout 30000ms exceeded"))
